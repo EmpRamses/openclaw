@@ -22,6 +22,7 @@ import {
   applySessionDefaults,
   applyTalkApiKey,
 } from "./defaults.js";
+import { restoreEnvVarRefs } from "./env-preserve.js";
 import { MissingEnvVarError, resolveConfigEnvVars } from "./env-substitution.js";
 import { collectConfigEnvVars } from "./env-vars.js";
 import { ConfigIncludeError, resolveConfigIncludes } from "./includes.js";
@@ -493,9 +494,28 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
     }
     const dir = path.dirname(configPath);
     await deps.fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-    const json = JSON.stringify(applyModelDefaults(stampConfigVersion(cfg)), null, 2)
-      .trimEnd()
-      .concat("\n");
+    const envForRestore = { ...deps.env } as NodeJS.ProcessEnv;
+    let configToWrite = applyModelDefaults(stampConfigVersion(cfg));
+    if (deps.fs.existsSync(configPath)) {
+      try {
+        const currentRaw = await deps.fs.promises.readFile(configPath, "utf-8");
+        const parsedRes = parseConfigJson5(currentRaw, deps.json5);
+        if (!parsedRes.ok) {
+          throw new Error(`current config parse failed: ${parsedRes.error}`);
+        }
+        if (parsedRes.parsed && typeof parsedRes.parsed === "object" && "env" in parsedRes.parsed) {
+          applyConfigEnv(parsedRes.parsed as OpenClawConfig, envForRestore);
+        }
+        configToWrite = restoreEnvVarRefs(
+          configToWrite,
+          parsedRes.parsed,
+          envForRestore,
+        ) as OpenClawConfig;
+      } catch (err) {
+        throw new Error(`unable to preserve env-var references safely: ${String(err)}`);
+      }
+    }
+    const json = JSON.stringify(configToWrite, null, 2).trimEnd().concat("\n");
 
     const tmp = path.join(
       dir,
